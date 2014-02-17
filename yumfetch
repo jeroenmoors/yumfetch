@@ -1,0 +1,305 @@
+#!/usr/bin/php
+<?php
+    
+    /*
+     * HTTP Client class
+     */
+    class httpFetcher {
+        
+        private $_curl;
+        public $error;
+        
+        public function __construct($config) {
+            $this->_curl = curl_init();
+            curl_setopt($this->_curl, CURLOPT_HEADER, 0); 
+            //curl_setopt($this->_curl, CURLOPT_SSLVERSION, 3); 
+            curl_setopt($this->_curl, CURLOPT_RETURNTRANSFER, 1); 
+            curl_setopt($this->_curl, CURLOPT_FOLLOWLOCATION, true);
+
+            foreach($config as $key => $val) {
+                curl_setopt($this->_curl, constant('CURLOPT_' . strtoupper($key)), $val);
+            }
+        }
+
+        public function get($url) {
+            curl_setopt($this->_curl, CURLOPT_URL, $url);
+            $response = curl_exec($this->_curl); 
+            if(!curl_errno($this->_curl)){ 
+                return $response;
+            } else { 
+                $this->error = curl_error($this->_curl); 
+                return false;
+            }
+        }
+        
+        public function __destroy() {
+            curl_close($tuCurl); 
+        }
+    }
+    
+    /*
+     * gzdecode function if php < 5.4
+     */
+    if (!function_exists('gzdecode')) {
+        function gzdecode($data,&$filename='',&$error='',$maxlength=null) {
+            $len = strlen($data);
+            if ($len < 18 || strcmp(substr($data,0,2),"\x1f\x8b")) {
+                $error = "Not in GZIP format.";
+                return null;  // Not GZIP format (See RFC 1952)
+            }
+            $method = ord(substr($data,2,1));  // Compression method
+            $flags  = ord(substr($data,3,1));  // Flags
+            if ($flags & 31 != $flags) {
+                $error = "Reserved bits not allowed.";
+                return null;
+            }
+            // NOTE: $mtime may be negative (PHP integer limitations)
+            $mtime = unpack("V", substr($data,4,4));
+            $mtime = $mtime[1];
+            $xfl   = substr($data,8,1);
+            $os    = substr($data,8,1);
+            $headerlen = 10;
+            $extralen  = 0;
+            $extra     = "";
+            if ($flags & 4) {
+                // 2-byte length prefixed EXTRA data in header
+                if ($len - $headerlen - 2 < 8) {
+                    return false;  // invalid
+                }
+                $extralen = unpack("v",substr($data,8,2));
+                $extralen = $extralen[1];
+                if ($len - $headerlen - 2 - $extralen < 8) {
+                    return false;  // invalid
+                }
+                $extra = substr($data,10,$extralen);
+                $headerlen += 2 + $extralen;
+            }
+            $filenamelen = 0;
+            $filename = "";
+            if ($flags & 8) {
+                // C-style string
+                if ($len - $headerlen - 1 < 8) {
+                    return false; // invalid
+                }
+                $filenamelen = strpos(substr($data,$headerlen),chr(0));
+                if ($filenamelen === false || $len - $headerlen - $filenamelen - 1 < 8) {
+                    return false; // invalid
+                }
+                $filename = substr($data,$headerlen,$filenamelen);
+                $headerlen += $filenamelen + 1;
+            }
+            $commentlen = 0;
+            $comment = "";
+            if ($flags & 16) {
+                // C-style string COMMENT data in header
+                if ($len - $headerlen - 1 < 8) {
+                    return false;    // invalid
+                }
+                $commentlen = strpos(substr($data,$headerlen),chr(0));
+                if ($commentlen === false || $len - $headerlen - $commentlen - 1 < 8) {
+                    return false;    // Invalid header format
+                }
+                $comment = substr($data,$headerlen,$commentlen);
+                $headerlen += $commentlen + 1;
+            }
+            $headercrc = "";
+            if ($flags & 2) {
+                // 2-bytes (lowest order) of CRC32 on header present
+                if ($len - $headerlen - 2 < 8) {
+                    return false;    // invalid
+                }
+                $calccrc = crc32(substr($data,0,$headerlen)) & 0xffff;
+                $headercrc = unpack("v", substr($data,$headerlen,2));
+                $headercrc = $headercrc[1];
+                if ($headercrc != $calccrc) {
+                    $error = "Header checksum failed.";
+                    return false;    // Bad header CRC
+                }
+                $headerlen += 2;
+            }
+            // GZIP FOOTER
+            $datacrc = unpack("V",substr($data,-8,4));
+            $datacrc = sprintf('%u',$datacrc[1] & 0xFFFFFFFF);
+            $isize = unpack("V",substr($data,-4));
+            $isize = $isize[1];
+            // decompression:
+            $bodylen = $len-$headerlen-8;
+            if ($bodylen < 1) {
+                // IMPLEMENTATION BUG!
+                return null;
+            }
+            $body = substr($data,$headerlen,$bodylen);
+            $data = "";
+            if ($bodylen > 0) {
+                switch ($method) {
+                case 8:
+                    // Currently the only supported compression method:
+                    $data = gzinflate($body,$maxlength);
+                    break;
+                default:
+                    $error = "Unknown compression method.";
+                    return false;
+                }
+            }  // zero-byte body content is allowed
+            // Verifiy CRC32
+            $crc   = sprintf("%u",crc32($data));
+            $crcOK = $crc == $datacrc;
+            $lenOK = $isize == strlen($data);
+            if (!$lenOK || !$crcOK) {
+                $error = ( $lenOK ? '' : 'Length check FAILED. ') . ( $crcOK ? '' : 'Checksum FAILED.');
+                return false;
+            }
+            return $data;
+        }
+    }
+    
+    function fetchPackage($httpClient, $packageUrl, $packageName, $packageVersion) {
+        print "Fetch: ".$packageUrl."\n";
+        if (!file_exists("/var/lib/yumfetch/cache")) {
+            mkdir("/var/lib/yumfetch/cache", '0700', true);
+        }
+        
+        $rpmFile = $httpClient->get($packageUrl);
+        file_put_contents("/var/lib/yumfetch/cache/".$packageName."-".$packageVersion.".rpm", $rpmFile);
+    }
+  
+  
+    function installPackage(&$status, $packageName, $packageVersion) {
+        $status->packages->{$packageName}->status    = "installed";
+        $status->packages->{$packageName}->version   = $packageVersion;
+        $status->packages->{$packageName}->timestamp = time();
+    
+    }
+    
+    function readStatus() {
+        if (file_exists("/var/lib/yumfetch/status.json")) {
+            return  json_decode(file_get_contents("/var/lib/yumfetch/status.json"));
+        } else {
+            return new stdClass();
+        }
+    }
+
+    function saveStatus($status) {
+        if (!file_exists("/var/lib/yumfetch")) {
+            mkdir("/var/lib/yumfetch", '0700', true);
+        }
+        file_put_contents("/var/lib/yumfetch/status.json", json_encode($status));
+    }
+  
+    /*
+     * Main application
+     */
+    $validArguments = array(
+        "install"   => "Fetches and extract the requested package",
+        "latest"    => "Install the latest version of the requested package",
+        "list"      => "List all available packages",
+        "status"    => "Show the current installed packages and their status",
+        "help"      => "This message"
+    );
+    
+    if (count($argv) < 1) {
+        $argCommand = "help";
+    } else {
+        $argCommand = $argv[1];
+        if (array_key_exists(2, $argv)) {
+            $argPackage = $argv[2];
+        }
+    }
+    
+    if (!array_key_exists($argCommand, $validArguments)) {
+        $argCommand = "help";
+    }
+    
+    if ($argCommand == "help") {
+        print "Yumfetch can fetch and extracts rmp packages from yum repositories.\n\n";
+        print "Usage: yumfetch <parameter> [package] [version]\n"; 
+        foreach($validArguments as $argument => $help) {
+            print "\t".$argument."\t".$help."\n";
+        }
+        print "\n";
+        exit(-1);
+    }
+    
+    if (!file_exists("/etc/yumfetch.conf")) {
+        echo "Config file /etc/yumfetch.conf not found\n";
+        exit(-1);
+    }
+    $config = parse_ini_file("/etc/yumfetch.conf", true);
+    // Currently only one repository is supported
+    $config = array_pop($config);
+    
+    if (!array_key_exists('location', $config)) {
+        echo "No location defined for repository.\n";
+        exit(-1);
+    }
+    
+    // Default configuration settings
+    $httpConfig = array(
+        "verbose"           => false,
+        "ssl_verifypeer"    => true
+    );
+    
+    if (array_key_exists('sslcert', $config)) {
+        $httpConfig['sslcert'] = $config['sslcert'];
+    }
+
+    if (array_key_exists('sslkey', $config)) {
+        $httpConfig['sslkey'] = $config['sslkey'];
+    }
+
+    
+    $repoUrl   = $config['location'];    
+
+    $httpClient = new httpFetcher($httpConfig);
+    $xml = $httpClient->get($repoUrl . "/repodata/repomd.xml");
+    
+    $status = readStatus();
+
+    $repoMetadata = new SimpleXMLElement($xml);
+    foreach ($repoMetadata as $metadataLocation) {
+        if ($metadataLocation["type"] == "primary") {
+            $metadataUrl = $repoUrl ."/". $metadataLocation->location["href"];
+        }
+    }
+    
+    print "Fetch: ".$metadataUrl."...\n";
+    $xmlGz = $httpClient->get($metadataUrl);
+    $xml = gzdecode($xmlGz);
+    
+    
+    $packages = array();
+    $repoPackages = new SimpleXMLElement($xml);
+    foreach($repoPackages as $repoPackage) {
+        $packages[(string)$repoPackage->name][(string)$repoPackage->version['ver']] = $repoUrl."/".(string)$repoPackage->location['href'];
+        //print $repoPackage->name." :: ".$repoPackage->version['ver']." :: ".$repoPackage->location['href']."\n";
+    }
+   
+    if (($argCommand == "install") || ($argCommand == "latest")) {
+        if (!array_key_exists($argPackage, $packages)) {
+            print "Can not found package '". $argPackage."'\n";
+            exit(-1);
+        }
+        
+        $packageVersions = $packages[$argPackage];
+        // Reverse sort array to get versions in order
+        ksort($packageVersions);
+        
+        $packageDetails = array_slice($packageVersions, -1, 1);
+        $packageVersion = key($packageDetails);
+        $packageUrl     = $packageDetails[$packageVersion];
+        
+        // Check if package is installed or old if $argCommand = latest
+        fetchPackage($httpClient, $packageUrl, $argPackage, $packageVersion);
+        installPackage($status, $argPackage, $packageVersion);
+        saveStatus($status);
+    }
+
+    if ($argCommand == "list") {
+        foreach($packages as $name => $details) {
+            print $name."\n";
+        }
+    }
+    
+    if ($argCommand == "status") {
+        var_dump($status);
+    }

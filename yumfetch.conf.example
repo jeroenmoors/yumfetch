@@ -1,0 +1,5 @@
+[private-repository]
+location = https://yum.someserver.com/private-repository/noarch/stable
+sslcert	= /etc/ssl/certs/myclientcert.pem
+sslkey = /etc/ssl/private_keys/myclientcert.pem
+
