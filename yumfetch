@@ -32,10 +32,56 @@
             }
         }
         
-        public function __destroy() {
-            curl_close($tuCurl); 
+        public function __destruct() {
+            curl_close($this->_curl); 
         }
     }
+
+	/*
+	 * Package installation status management
+	 */
+    class packageStatus {
+		private $_hasChanged = false;
+		private $_config;
+		public $status = array();
+		
+		public function __construct(&$config) {
+			$this->_config = $config;
+			$this->read();
+		}
+
+		public function __destruct() {
+			if ($this->_hasChanged) {
+				$this->save();
+			}
+		}		
+
+	    public function read() {
+			if (file_exists($this->_config['status'])) {
+				$this->status = json_decode(file_get_contents($this->_config['status']));
+			} else {
+				$this->status = new stdClass();
+			}
+		}
+
+		public function save() {
+			if (!file_exists(dirname($this->_config['status']))) {
+				mkdir(dirname($this->_config['status']), '0700', true);
+			}
+			file_put_contents($this->_config['status'], json_encode($this->status));
+		}
+		
+		function set($package, $version, $status = "installed") {
+			$this->status->packages->{$package}->status    = $status;
+			$this->status->packages->{$package}->version   = $version;
+			$this->status->packages->{$package}->timestamp = time();
+		}
+		
+		function get($package) {
+			$this->_hasChanged = true;
+			return $this->status->packages->{$package};
+		}
+	}
     
     /*
      * gzdecode function if php < 5.4
@@ -165,30 +211,17 @@
   
   
     function installPackage(&$status, $packageName, $packageVersion) {
-        $status->packages->{$packageName}->status    = "installed";
-        $status->packages->{$packageName}->version   = $packageVersion;
-        $status->packages->{$packageName}->timestamp = time();
-    
-    }
-    
-    function readStatus() {
-        if (file_exists("/var/lib/yumfetch/status.json")) {
-            return  json_decode(file_get_contents("/var/lib/yumfetch/status.json"));
-        } else {
-            return new stdClass();
-        }
-    }
-
-    function saveStatus($status) {
-        if (!file_exists("/var/lib/yumfetch")) {
-            mkdir("/var/lib/yumfetch", '0700', true);
-        }
-        file_put_contents("/var/lib/yumfetch/status.json", json_encode($status));
+		print "Install package ".$packageName." (".$packageVersion.")\n";
+		$cmd = "rpm -i /var/lib/yumfetch/cache/".$packageName."-".$packageVersion.".rpm";
+		print `$cmd`."\n";
+		$status->set($packageName, $packageVersion, "installed");
     }
   
     /*
      * Main application
      */
+    $configFile 	= "/etc/yumfetch.conf";
+    
     $validArguments = array(
         "install"   => "Fetches and extract the requested package",
         "latest"    => "Install the latest version of the requested package",
@@ -197,7 +230,10 @@
         "help"      => "This message"
     );
     
-    if (count($argv) < 1) {
+    /*
+     * Try to manage argument is a somehow acceptable way
+     */
+    if (count($argv) < 2) {
         $argCommand = "help";
     } else {
         $argCommand = $argv[1];
@@ -220,20 +256,25 @@
         exit(-1);
     }
     
-    if (!file_exists("/etc/yumfetch.conf")) {
+	/*
+	 * Read config file & add defaults
+	 */
+    if (!file_exists($configFile)) {
         echo "Config file /etc/yumfetch.conf not found\n";
         exit(-1);
-    }
-    $config = parse_ini_file("/etc/yumfetch.conf", true);
-    // Currently only one repository is supported
-    $config = array_pop($config);
+    }    
     
-    if (!array_key_exists('location', $config)) {
-        echo "No location defined for repository.\n";
+    $config = parse_ini_file($configFile, false);
+    if (!array_key_exists('repository', $config)) {
+        echo "No repository defined in $configFile.\n";
         exit(-1);
     }
+   
+	if (!array_key_exists('status', $config)) {
+		$config['status'] = '/var/lib/yumfetch/status.json';
+	}
     
-    // Default configuration settings
+    // Default configuration settings for http client
     $httpConfig = array(
         "verbose"           => false,
         "ssl_verifypeer"    => true
@@ -247,18 +288,15 @@
         $httpConfig['sslkey'] = $config['sslkey'];
     }
 
-    
-    $repoUrl   = $config['location'];    
-
     $httpClient = new httpFetcher($httpConfig);
-    $xml = $httpClient->get($repoUrl . "/repodata/repomd.xml");
+    $xml = $httpClient->get($config['repository']."/repodata/repomd.xml");
     
-    $status = readStatus();
+    $status = new packageStatus($config);
 
     $repoMetadata = new SimpleXMLElement($xml);
     foreach ($repoMetadata as $metadataLocation) {
         if ($metadataLocation["type"] == "primary") {
-            $metadataUrl = $repoUrl ."/". $metadataLocation->location["href"];
+            $metadataUrl = $config['repository']."/". $metadataLocation->location["href"];
         }
     }
     
@@ -270,17 +308,16 @@
     $packages = array();
     $repoPackages = new SimpleXMLElement($xml);
     foreach($repoPackages as $repoPackage) {
-        $packages[(string)$repoPackage->name][(string)$repoPackage->version['ver']] = $repoUrl."/".(string)$repoPackage->location['href'];
-        //print $repoPackage->name." :: ".$repoPackage->version['ver']." :: ".$repoPackage->location['href']."\n";
+        $packages[(string)$repoPackage->name][(string)$repoPackage->version['ver']] = $config['repository']."/".(string)$repoPackage->location['href'];
     }
    
     if (($argCommand == "install") || ($argCommand == "latest")) {
         if (!array_key_exists($argPackage, $packages)) {
             print "Can not found package '". $argPackage."'\n";
             exit(-1);
-        }
-        
+        }        
         $packageVersions = $packages[$argPackage];
+
         // Reverse sort array to get versions in order
         ksort($packageVersions);
         
@@ -288,10 +325,19 @@
         $packageVersion = key($packageDetails);
         $packageUrl     = $packageDetails[$packageVersion];
         
+        $packageStatus = $status->get($argPackage);
+		if ($packageStatus && ($argCommand == "install")) {
+			print "Package already installed. Use latest ensure the latest version is installed.\n";
+			exit();
+		}
+
+        if ($packageStatus->version >= $packageVersion) {
+			print "Installed version is equal or higher as available version.\n";
+			exit();
+		}
         // Check if package is installed or old if $argCommand = latest
         fetchPackage($httpClient, $packageUrl, $argPackage, $packageVersion);
         installPackage($status, $argPackage, $packageVersion);
-        saveStatus($status);
     }
 
     if ($argCommand == "list") {
@@ -301,5 +347,5 @@
     }
     
     if ($argCommand == "status") {
-        var_dump($status);
+        var_dump($status->status);
     }

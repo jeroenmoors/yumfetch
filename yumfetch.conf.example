@@ -1,5 +1,13 @@
-[private-repository]
-location = https://yum.someserver.com/private-repository/noarch/stable
+[yumfetch]
+; URL of the repository to fetch from 
+repository = https://yum.someserver.com/private-repository/noarch/stable
+
+; Client certificate and key
 sslcert	= /etc/ssl/certs/myclientcert.pem
 sslkey = /etc/ssl/private_keys/myclientcert.pem
 
+; File to store the status
+status = /var/lib/yumfetch/status.json
+
+; Directory to store rpm files
+cache = /var/lib/yumfetch/cache
