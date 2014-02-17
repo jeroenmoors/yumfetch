@@ -1,5 +1,10 @@
 #!/usr/bin/php
 <?php
+	/*
+	 * yumfetch - A minimalistic yum implementation in php for non-yum systems.
+	 * https://github.com/jeroenmoors/yumfetch
+	 */
+    $VERSION = "0.0.1";
     
     /*
      * HTTP Client class
